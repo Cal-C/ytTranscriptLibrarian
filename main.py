@@ -147,6 +147,7 @@ def fetch_transcripts(videos, existing_transcripts):
 
         # If transcript is not found, fetch it
         try:
+            print(f"Fetching transcript for {video_title} ({video_id})...")
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
 
             # Format the transcript with timecodes every minute
@@ -161,6 +162,7 @@ def fetch_transcripts(videos, existing_transcripts):
                 # Add timecode if the minute has advanced
                 if minute != current_minute:
                     if hour > 0:  # Format timecode with hours if necessary
+                        minute = minute % 60  # Get minute within the hour
                         timecode = f"[{hour}:{minute:02d}]"
                     else:
                         timecode = f"[{minute}]"
