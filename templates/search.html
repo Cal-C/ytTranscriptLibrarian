@@ -6,16 +6,19 @@
     <title>Search Results</title>
 </head>
 <body>
-    <h1>Search Results</h1>
+    <h1>Search Results for "{{ query }}"</h1>
 
     {% if results %}
         <ul>
         {% for result in results %}
             <li>
                 <h3><a href="/video/{{ result.video_id }}">{{ result.title }}</a></h3>
-                <p><strong>Time:</strong> {{ result.start_time }}s</p>
-                <!-- Display the transcript with bolded query -->
-                <p>{{ result.transcript|safe }}</p>
+                <p><strong>Uploader:</strong> {{ result.uploader_name }}</p>
+                <p><strong>Upload Date:</strong> {{ result.date_uploaded }}</p>
+                {% for snippet in result.snippets %}
+                    <p>{{ snippet|safe }}</p>
+                {% endfor %}
+                <a href="/video/{{ result.video_id }}">View Full Transcript</a>
             </li>
         {% endfor %}
         </ul>

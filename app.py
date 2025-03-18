@@ -6,18 +6,62 @@ from getData import get_db_connection
 
 app = Flask(__name__)
 
-
 # Function to clean transcripts for search comparison (ignoring timecodes)
 def clean_transcript_for_search(text):
-    # Remove any timecode format like [00:01:23] or [0:12] for search purposes
-    return re.sub(r'\[.*?\]', '', text)
+    return re.sub(r'\[.*?\]', '', text)  # Remove timecodes like [00:01:23]
 
 # Function to bold search query in the transcript
 def bold_query_in_transcript(text, query):
-    # Escape query to handle special regex characters
-    escaped_query = re.escape(query)
-    # Bold the search query
+    escaped_query = re.escape(query)  # Escape for regex
     return re.sub(rf'({escaped_query})', r'<b>\1</b>', text, flags=re.IGNORECASE)
+
+# Function to filter transcript snippets around search occurrences
+def extract_relevant_snippets(transcript_data, query):
+    query_regex = re.compile(re.escape(query), re.IGNORECASE)
+    occurrences = {}
+
+    # Find all matches in the transcript
+    for video_id, title, uploader_name, date_uploaded, start_time, transcript in transcript_data:
+        cleaned_transcript = clean_transcript_for_search(transcript)
+        matches = list(query_regex.finditer(cleaned_transcript))
+        if matches:
+            if video_id not in occurrences:
+                occurrences[video_id] = {
+                    'title': title,
+                    'uploader_name': uploader_name,
+                    'date_uploaded': date_uploaded,
+                    'transcript': transcript,
+                    'matches': []
+                }
+            for match in matches:
+                occurrences[video_id]['matches'].append((match.start(), match.end()))
+
+    results = []
+    for video_id, data in occurrences.items():
+        title = data['title']
+        uploader_name = data['uploader_name']
+        date_uploaded = data['date_uploaded']
+        transcript = data['transcript']
+        matches = data['matches']
+
+        snippets = []
+        for match_start, match_end in matches:
+            snippet_start = max(0, match_start - 500)  # Approximate 2 min before
+            snippet_end = min(len(transcript), match_end + 500)  # Approximate 2 min after
+            snippet = transcript[snippet_start:snippet_end]
+            snippet = bold_query_in_transcript(snippet, query)
+            snippets.append(snippet)
+
+        results.append({
+            'video_id': video_id,
+            'title': title,
+            'uploader_name': uploader_name,
+            'date_uploaded': date_uploaded,
+            'snippets': snippets
+        })
+
+    return results
+
 
 # Search function for transcripts
 @app.route('/search', methods=['GET', 'POST'])
@@ -27,10 +71,10 @@ def search():
     if query:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         # Fetch all video transcripts
         cur.execute('''
-            SELECT v.video_id, v.title, t.start_time, t.transcript
+            SELECT v.video_id, v.title, v.uploader_name, v.date_uploaded, t.start_time, t.transcript
             FROM videos v
             JOIN transcripts t ON v.video_id = t.video_id;
         ''')
@@ -38,21 +82,9 @@ def search():
         cur.close()
         conn.close()
 
-        # Loop through the transcripts and search for the query
-        for row in rows:
-            video_id, title, start_time, transcript = row
-            cleaned_transcript = clean_transcript_for_search(transcript)  # Clean for search comparison
-            if re.search(query, cleaned_transcript, re.IGNORECASE):  # Case-insensitive search
-                # Bold the query in the original transcript for results
-                bolded_transcript = bold_query_in_transcript(transcript, query)
-                results.append({
-                    'video_id': video_id,
-                    'title': title,
-                    'start_time': start_time,
-                    'transcript': bolded_transcript  # Store the bolded transcript
-                })
+        results = extract_relevant_snippets(rows, query)
 
-    return render_template('search.html', results=results)
+    return render_template('search.html', results=results, query=query)
 
 # Home page to list channels
 @app.route('/')
@@ -79,7 +111,7 @@ def channel(channel_id):
     conn.close()
     return render_template('channel.html', videos=videos)
 
-# Show transcript for a video
+# Show full transcript for a video
 @app.route('/video/<video_id>')
 def video(video_id):
     conn = get_db_connection()
@@ -98,4 +130,3 @@ def video(video_id):
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
-
