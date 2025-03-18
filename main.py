@@ -1,277 +1,166 @@
-import os
 import re
-import csv
-import json
+import psycopg2
+from psycopg2.extras import DictCursor
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
+import csv
 
-# YouTube API setup
-with open('shh.txt', 'r') as file:
-    API_KEY = file.read().strip()
-youtube = build('youtube', 'v3', developerKey=API_KEY)
+# Database connection setup
+def get_db_connection():
+    return psycopg2.connect(
+        dbname="youtube_librarian_data",
+        user=dbuser,
+        password=dbpass,
+        host="127.0.0.1",
+        port="5432"
+    )
 
-# Load known channel URLs and IDs from a JSON file
-def load_channel_data():
-    if os.path.exists('channels_data.json'):
-        with open('channels_data.json', 'r', encoding='utf-8') as file:
-            return json.load(file)
-    return {}
+# Initialize YouTube API
+def load_secrets():
+    with open('shh.txt', 'r') as file:
+        api_key = file.readline().strip()
+        dbuser = file.readline().strip()
+        dbpass = file.readline().strip()
+    return api_key, dbuser, dbpass
 
-# Save the updated channel URL-ID mappings to a JSON file
-def save_channel_data(channel_data):
-    with open('channels_data.json', 'w', encoding='utf-8') as file:
-        json.dump(channel_data, file, indent=4, ensure_ascii=False)
+api_key, dbuser, dbpass = load_secrets()
+youtube = build('youtube', 'v3', developerKey=api_key)
 
-# Step 1: Extract channel ID from YouTube channel URL
-def extract_channel_id(channel_url, known_channels):
-    # Check if the channel URL is already known
-    if channel_url in known_channels:
-        print(f"Found known channel ID for {channel_url}, as it was saved previously.")
-        return known_channels[channel_url]
+# Ensure tables exist
+def initialize_db():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS channels (
+                    id SERIAL PRIMARY KEY,
+                    url TEXT UNIQUE NOT NULL,
+                    channel_id TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS videos (
+                    video_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL REFERENCES channels(channel_id),
+                    title TEXT NOT NULL,
+                    video_url TEXT NOT NULL,
+                    uploader_name TEXT NOT NULL,
+                    date_uploaded TIMESTAMP NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS transcripts (
+                    video_id TEXT NOT NULL REFERENCES videos(video_id),
+                    start_time INT NOT NULL,
+                    transcript TEXT NOT NULL,
+                    PRIMARY KEY (video_id, start_time)
+                );
+            """)
+            conn.commit()
 
+# Fetch channel ID from DB or API
+def get_channel_id(channel_url):
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT channel_id FROM channels WHERE url = %s", (channel_url,))
+            row = cur.fetchone()
+            if row:
+                return row['channel_id']
+
+            channel_id = extract_channel_id_from_api(channel_url)
+            if channel_id:
+                cur.execute("INSERT INTO channels (url, channel_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (channel_url, channel_id))
+                conn.commit()
+                return channel_id
+    return None
+
+# Extract channel ID using YouTube API
+def extract_channel_id_from_api(channel_url):
     try:
-        # Try extracting from URL directly
         match = re.search(r"youtube\.com\/channel\/([\w-]+)", channel_url)
         if match:
-            channel_id = match.group(1)
-            known_channels[channel_url] = channel_id  # Save the known mapping
-            return channel_id
+            return match.group(1)
 
-        # Handle other formats (e.g., user, custom URL)
-        match = re.search(r"youtube\.com\/user\/([\w-]+)", channel_url)
-        if match:
-            username = match.group(1)
-            request = youtube.channels().list(part="id", forUsername=username)
-            response = request.execute()
-            if response['items']:
-                channel_id = response['items'][0]['id']
-                known_channels[channel_url] = channel_id  # Save the known mapping
-                return channel_id
-
-        match = re.search(r"youtube\.com\/(?:c|@)\/([\w-]+)", channel_url)
-        if match:
-            custom_url = match.group(1)
-            request = youtube.search().list(
-                part="snippet",
-                q=custom_url,
-                type="channel",
-                maxResults=1
-            )
-            response = request.execute()
-            if response['items']:
-                channel_id = response['items'][0]['snippet']['channelId']
-                known_channels[channel_url] = channel_id  # Save the known mapping
-                return channel_id
-
-        if "youtube.com/@" in channel_url:
-            handle = channel_url.split("@")[1]
-            request = youtube.search().list(
-                part="snippet",
-                q=handle,
-                type="channel",
-                maxResults=1
-            )
-            response = request.execute()
-            if response['items']:
-                channel_id = response['items'][0]['snippet']['channelId']
-                known_channels[channel_url] = channel_id  # Save the known mapping
-                return channel_id
-
-        raise ValueError("Invalid URL format")
+        # Handle other formats (user, custom URL, handle)
+        request = youtube.search().list(part="snippet", q=channel_url.split("/")[-1], type="channel", maxResults=1)
+        response = request.execute()
+        if response['items']:
+            return response['items'][0]['snippet']['channelId']
     except Exception as e:
-        print(f"Error resolving channel ID for {channel_url}: {e}, by requesting from the API.")
-        return None
+        print(f"Error resolving channel ID: {e}")
+    return None
 
-# Step 2: Get video URLs, titles, uploader info, and date for the N most recent videos
+# Fetch videos from API and store them
 def get_recent_videos(channel_id, n):
     videos = []
-    print(f"Fetching {n} most recent videos for channel {channel_id}...")
-
-    page_token = None
-    while len(videos) < n:
-        try:
-            request = youtube.search().list(
-                part="id,snippet",
-                channelId=channel_id,
-                maxResults=50,
-                order="date",
-                type="video",
-                pageToken=page_token
-            )
-            response = request.execute()
-
-            for item in response['items']:
-                if len(videos) < n:
-                    video_url = f"https://www.youtube.com/watch?v={item['id']['videoId']}"
-                    videos.append({
-                        "id": item['id']['videoId'],
-                        "title": item['snippet']['title'],
-                        "video_url": video_url,
-                        "uploader_name": item['snippet']['channelTitle'],
-                        "date_uploaded": item['snippet']['publishedAt']
-                    })
-                else:
-                    break
-
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
-
-        except Exception as e:
-            print(f"Could not fetch videos for channel {channel_id}: {e}")
-            break
-
-    print(f"Found {len(videos)} videos for channel {channel_id}.")
+    request = youtube.search().list(
+        part="id,snippet",
+        channelId=channel_id,
+        maxResults=n,
+        order="date",
+        type="video"
+    )
+    response = request.execute()
+    for item in response['items']:
+        videos.append({
+            "video_id": item['id']['videoId'],
+            "title": item['snippet']['title'],
+            "video_url": f"https://www.youtube.com/watch?v={item['id']['videoId']}",
+            "uploader_name": item['snippet']['channelTitle'],
+            "date_uploaded": item['snippet']['publishedAt']
+        })
+    store_videos(channel_id, videos)
     return videos
 
-# Step 3: Fetch transcripts for the given videos
-def fetch_transcripts(videos, existing_transcripts):
-    """
-    Fetch transcripts for a list of videos, including titles, uploader info, and timecodes.
-    Only fetch the transcript if it has not been already fetched.
-    """
-    transcripts = {}
-    errors = {}
-    for video in videos:
-        video_id = video['id']
-        video_title = video['title']
-        uploader_name = video['uploader_name']
-        video_url = video['video_url']
-        date_uploaded = video['date_uploaded']
-        combined_key = f"{video_title} ({video_url}) [{date_uploaded}]"
-
-        # Check if the transcript already exists
-        if combined_key in existing_transcripts:
-            print(f"Skipping {video_title} ({video_id}) as it's already fetched.")
-            continue  # Skip this video since it's already fetched
-
-        # If transcript is not found, fetch it
-        try:
-            print(f"Fetching transcript for {video_title} ({video_id})...")
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-
-            # Format the transcript with timecodes every minute
-            formatted_transcript = []
-            current_minute = -1  # Track the last minute added
-
-            for item in transcript:
-                start_time = int(item['start'])  # Get start time in seconds
-                minute = start_time // 60  # Calculate minute
-                hour = start_time // 3600  # Calculate hour
-
-                # Add timecode if the minute has advanced
-                if minute != current_minute:
-                    if hour > 0:  # Format timecode with hours if necessary
-                        minute = minute % 60  # Get minute within the hour
-                        timecode = f"[{hour}:{minute:02d}]"
-                    else:
-                        timecode = f"[{minute}]"
-                    
-                    formatted_transcript.append(timecode)  # Add timecode
-                    current_minute = minute  # Update current minute
-
-                # Add the transcript text
-                formatted_transcript.append(item['text'])
-
-            # Join the transcript with spaces to include timecodes correctly
-            final_transcript = " ".join(formatted_transcript)
-
-            # Save the transcript
-            transcripts[combined_key] = {
-                "video_id": video_id,
-                "title": video_title,
-                "uploader_name": uploader_name,
-                "video_url": video_url,
-                "date_uploaded": date_uploaded,
-                "transcript": final_transcript  # Save formatted transcript with timecodes
-            }
-
-        except Exception as e:
-            errors[combined_key] = {
-                "error": str(e),
-                "video_id": video_id,
-                "title": video_title,
-                "uploader_name": uploader_name,
-                "video_url": video_url,
-                "date_uploaded": date_uploaded
-            }
-
-    return transcripts, errors
+# Store videos in the database
+def store_videos(channel_id, videos):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for video in videos:
+                cur.execute("""
+                    INSERT INTO videos (video_id, channel_id, title, video_url, uploader_name, date_uploaded)
+                    VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                """, (video['video_id'], channel_id, video['title'], video['video_url'], video['uploader_name'], video['date_uploaded']))
+            conn.commit()
 
 
-# Step 4: Save transcripts and errors to separate JSON files
-def save_to_json(transcripts, errors, output_file, error_file):
-    with open(output_file, 'w', encoding='utf-8') as file:
-        json.dump(transcripts, file, indent=4, ensure_ascii=False)
-    
-    if errors:
-        with open(error_file, 'w', encoding='utf-8') as file:
-            json.dump(errors, file, indent=4, ensure_ascii=False)
 
-# Check if the transcripts.json file exists
-def check_if_file_exists(output_file):
-    return os.path.exists(output_file)
+# Fetch and store transcripts
+def fetch_and_store_transcripts():
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT video_id FROM videos WHERE video_id NOT IN (SELECT DISTINCT video_id FROM transcripts)")
+            videos = cur.fetchall()
+            for video in videos:
+                try:
+                    transcript = YouTubeTranscriptApi.get_transcript(video['video_id'])
+                    segments = split_transcript_into_segments(transcript, 1800)  # 1800 seconds = 30 minutes
+                    for start_time, segment in segments.items():
+                        formatted_transcript = " ".join([f"[{int(item['start']) // 60}:{int(item['start']) % 60}] {item['text']}" for item in segment])
+                        cur.execute("INSERT INTO transcripts (video_id, start_time, transcript) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (video['video_id'], start_time, formatted_transcript))
+                    conn.commit()
+                except Exception as e:
+                    print(f"Failed to fetch transcript for {video['video_id']}: {e}")
 
-# Main script
+def split_transcript_into_segments(transcript, segment_length):
+    segments = {}
+    current_segment = []
+    current_start_time = 0
+    for item in transcript:
+        if item['start'] >= current_start_time + segment_length:
+            segments[current_start_time] = current_segment
+            current_segment = []
+            current_start_time += segment_length
+        current_segment.append(item)
+    if current_segment:
+        segments[current_start_time] = current_segment
+    return segments
+
 if __name__ == "__main__":
-    csv_file = "channels.csv"
-    output_file = "transcripts.json"
-    error_file = "errors.json"
-
-    # Load the known channel data from the JSON file
-    known_channels = load_channel_data()
-
-    if os.path.exists(output_file):
-        print(f"{output_file} exists. Checking for already fetched videos...")
-        with open(output_file, 'r', encoding='utf-8') as file:
-            existing_transcripts = json.load(file)
-    else:
-        proceed = input(f"{output_file} does not exist. Do you want to proceed and create it? (y/n): ").strip().lower()
-        if proceed != 'y':
-            print("Operation canceled.")
-            exit()
-        existing_transcripts = {}
-
+    initialize_db()
+    # Read channel URLs from targets.csv
     channel_urls = []
-    with open(csv_file, 'r') as file:
-        reader = csv.DictReader(file)
+    with open('targets.csv', newline='') as csvfile:
+        reader = csv.reader(csvfile)
         for row in reader:
-            channel_urls.append(row['channel_url'])
-
-    print(f"Found {len(channel_urls)} channel URLs in the CSV.")
-
-    all_transcripts = existing_transcripts.copy()
-    all_errors = {}
-
+            channel_urls.append(row[0])
     for channel_url in channel_urls:
-        print(f"Processing channel: {channel_url}")
-
-        with open(csv_file, 'r') as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                if row['channel_url'] == channel_url:
-                    vids_fetched = int(row['vids_fetched'])
-                    break
-
-        print(f"Fetching {vids_fetched} most recent videos for channel {channel_url}...")
-        channel_id = extract_channel_id(channel_url, known_channels)
-        if not channel_id:
-            continue
-
-        videos = get_recent_videos(channel_id, vids_fetched)
-        if not videos:
-            continue
-
-        transcripts, errors = fetch_transcripts(videos, existing_transcripts)
-
-        for combined_key, data in transcripts.items():
-            all_transcripts[combined_key] = data
-
-        all_errors.update(errors)
-
-    # Save the updated channel mappings and transcripts
-    save_channel_data(known_channels)
-    save_to_json(all_transcripts, all_errors, output_file, error_file)
-    print(f"Transcripts saved to {output_file}.")
-    if all_errors:
-        print(f"Errors saved to {error_file}.")
+        channel_id = get_channel_id(channel_url)
+        if channel_id:
+            videos = get_recent_videos(channel_id, 5)
+    fetch_and_store_transcripts()

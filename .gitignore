@@ -4,3 +4,4 @@ channels_data.json
 transcripts.json
 errors.json
 reduced_kid_transcripts*
+targets.csv
