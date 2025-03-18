@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Transcript</title>
+</head>
+<body>
+    <h1>Video Transcript</h1>
+    <ul>
+        {% for entry in video_transcripts %}
+        <li><strong>{{ entry[2] }}s:</strong> {{ entry[3] }}</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>

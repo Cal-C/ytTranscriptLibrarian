@@ -162,5 +162,5 @@ if __name__ == "__main__":
     for channel_url in channel_urls:
         channel_id = get_channel_id(channel_url)
         if channel_id:
-            videos = get_recent_videos(channel_id, 5)
+            videos = get_recent_videos(channel_id, 50)
     fetch_and_store_transcripts()

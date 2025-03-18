@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Results</title>
+</head>
+<body>
+    <h1>Search Results</h1>
+
+    {% if results %}
+        <ul>
+        {% for result in results %}
+            <li>
+                <h3><a href="/video/{{ result.video_id }}">{{ result.title }}</a></h3>
+                <p><strong>Time:</strong> {{ result.start_time }}s</p>
+                <!-- Display the transcript with bolded query -->
+                <p>{{ result.transcript|safe }}</p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% else %}
+        <p>No results found.</p>
+    {% endif %}
+
+    <br><a href="/">Back to Channels</a>
+</body>
+</html>
