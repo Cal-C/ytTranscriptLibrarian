@@ -97,4 +97,5 @@ def video(video_id):
     return render_template('video.html', video_transcripts=video_transcripts)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
