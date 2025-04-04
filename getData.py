@@ -91,12 +91,13 @@ def extract_channel_id_from_api(channel_url):
         print(f"Error resolving channel ID: {e}")
     return None
 
-# Fetch videos from API and store them
 def get_recent_videos(channel_id, n):
+    print(f"Fetching videos for channel {channel_id}...")
     videos = []
     next_page_token = None
 
     with get_db_connection() as conn:
+        print(f"Checking database for existing videos for channel {channel_id}...")
         with conn.cursor(cursor_factory=DictCursor) as cur:
             # Check how many videos are already in the database
             cur.execute("SELECT COUNT(*) FROM videos WHERE channel_id = %s", (channel_id,))
@@ -111,11 +112,15 @@ def get_recent_videos(channel_id, n):
             last_video = cur.fetchone()
             last_video_id = last_video['video_id'] if last_video else None
 
-    while len(videos) < n - video_count:
+    # Calculate how many more videos we need to fetch
+    videos_needed = n - video_count
+    skipped_videos = 0
+
+    while len(videos) < videos_needed:
         request = youtube.search().list(
             part="id,snippet",
             channelId=channel_id,
-            maxResults=min(n - len(videos) - video_count, 50),  # Fetch up to 50 videos at a time
+            maxResults=min(videos_needed - len(videos), 50),  # Fetch up to 50 videos at a time
             order="date",
             type="video",
             pageToken=next_page_token
@@ -124,7 +129,16 @@ def get_recent_videos(channel_id, n):
         for item in response['items']:
             video_id = item['id']['videoId']
             if video_id == last_video_id:
-                return  # Stop fetching if we reach the last video in the database
+                print(f"Reached the last video in the database: {last_video_id}")
+                break  # Stop fetching if we reach the last video in the database
+            
+            # Check if the video is already in the database
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM videos WHERE video_id = %s", (video_id,))
+                    if cur.fetchone()[0] > 0:
+                        skipped_videos += 1  # Increment skipped videos count
+                        continue
 
             videos.append({
                 "video_id": video_id,
@@ -134,11 +148,25 @@ def get_recent_videos(channel_id, n):
                 "date_uploaded": item['snippet']['publishedAt']
             })
 
+        # Handle pagination if needed
         next_page_token = response.get('nextPageToken')
         if not next_page_token:
             break
 
+    # Log how many videos were skipped
+    if skipped_videos > 0:
+        print(f"Skipped {skipped_videos} already existing videos in the database.")
+
+
+
+
     store_videos(channel_id, videos)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT uploader_name FROM videos WHERE channel_id = %s LIMIT 1", (channel_id,))
+            channel_name = cur.fetchone()
+            if channel_name:
+                print(f"Stored {len(videos)} new videos for {channel_name[0]}")
     return videos
 
 # Store videos in the database
@@ -205,5 +233,9 @@ if __name__ == "__main__":
     for channel_url in channel_urls:
         channel_id = get_channel_id(channel_url)
         if channel_id:
-            videos = get_recent_videos(channel_id, 50)
+            print(f"fetching for {channel_url}")
+            # Fetch recent videos for the channel
+            videos = get_recent_videos(channel_id, 5000)
+        else:
+            print(f"Failed to get channel ID for {channel_url}")
     fetch_and_store_transcripts()

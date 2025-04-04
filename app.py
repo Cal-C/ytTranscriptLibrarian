@@ -1,6 +1,8 @@
 import re
 from flask import Flask, render_template, request
 import psycopg2
+from datetime import datetime
+
 
 from getData import get_db_connection
 
@@ -26,11 +28,13 @@ def extract_relevant_snippets(transcript_data, query):
         matches = list(query_regex.finditer(cleaned_transcript))
         if matches:
             if video_id not in occurrences:
+                # Format date_uploaded to display date and hour in AM/PM notation
+                formatted_date_uploaded = date_uploaded.strftime('%Y-%m-%d %I%p')
                 occurrences[video_id] = {
                     'title': title,
                     'uploader_name': uploader_name,
-                    'date_uploaded': date_uploaded,
-                    'transcript': transcript,
+                    'date_uploaded': formatted_date_uploaded,
+                    'cleaned_transcript': cleaned_transcript,
                     'matches': []
                 }
             for match in matches:
@@ -41,14 +45,14 @@ def extract_relevant_snippets(transcript_data, query):
         title = data['title']
         uploader_name = data['uploader_name']
         date_uploaded = data['date_uploaded']
-        transcript = data['transcript']
+        cleaned_transcript = data['cleaned_transcript']
         matches = data['matches']
 
         snippets = []
         for match_start, match_end in matches:
             snippet_start = max(0, match_start - 500)  # Approximate 2 min before
-            snippet_end = min(len(transcript), match_end + 500)  # Approximate 2 min after
-            snippet = transcript[snippet_start:snippet_end]
+            snippet_end = min(len(cleaned_transcript), match_end + 500)  # Approximate 2 min after
+            snippet = cleaned_transcript[snippet_start:snippet_end]
             snippet = bold_query_in_transcript(snippet, query)
             snippets.append(snippet)
 
@@ -61,7 +65,6 @@ def extract_relevant_snippets(transcript_data, query):
         })
 
     return results
-
 
 # Search function for transcripts
 @app.route('/search', methods=['GET', 'POST'])

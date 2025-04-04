@@ -7,6 +7,13 @@
 </head>
 <body>
     <h1>Video Transcript</h1>
+    
+    <!-- Display the video title and link -->
+    {% if video_transcripts %}
+        <h2>{{ video_transcripts[0][0] }}</h2>
+        <p><a href="{{ video_transcripts[0][1] }}" target="_blank">Watch on YouTube</a></p>
+    {% endif %}
+
     <ul>
         {% for entry in video_transcripts %}
         <li><strong>{{ entry[2] }}s:</strong> {{ entry[3] }}</li>
